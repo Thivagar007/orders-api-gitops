@@ -1,0 +1,37 @@
+# Flux HelmRelease: "install the orders-api chart from this Git repo into the dev namespace"
+# It lives in flux-system because the AKS Flux extension blocks cross-namespace
+# references by default; targetNamespace puts the actual workload in "dev".
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: orders-api-dev
+  namespace: flux-system
+spec:
+  interval: 2m
+  releaseName: orders-api
+  targetNamespace: dev
+  storageNamespace: dev
+  chart:
+    spec:
+      chart: ./charts/orders-api
+      reconcileStrategy: Revision      # re-render on every new Git commit
+      sourceRef:
+        kind: GitRepository
+        name: gitops                   # created by `az k8s-configuration flux create -n gitops`
+        namespace: flux-system
+      valuesFiles:
+        - ./charts/orders-api/values.yaml
+        - ./charts/orders-api/values-dev.yaml
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+  # Self-healing: if someone changes resources with kubectl, Flux puts them back
+  driftDetection:
+    mode: enabled
+    ignore:
+      - paths: ["/spec/replicas"]      # replicas are owned by the HPA
+        target:
+          kind: Deployment

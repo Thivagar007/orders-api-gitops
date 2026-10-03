@@ -1,0 +1,39 @@
+# Base values shared by every environment.
+# Environment-specific overrides live in values-dev.yaml / values-prod.yaml.
+# The CI/CD pipelines ONLY ever change image.tag in those env files.
+
+image:
+  repository: REPLACE_ACR_NAME.azurecr.io/orders-api
+  tag: "initial"
+  pullPolicy: IfNotPresent
+
+environment: base
+
+# Used only when autoscaling.enabled=false (HPA owns replicas otherwise)
+replicaCount: 2
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+# Requests are REQUIRED for the HPA to calculate CPU utilisation %
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# Keep minAvailable < autoscaling.minReplicas, otherwise node drains get blocked forever
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

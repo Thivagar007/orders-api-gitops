@@ -1,0 +1,7 @@
+# Flux applies everything listed here (path ./deploy/flux in the Flux configuration)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespaces.yaml
+  - orders-api-dev.yaml
+  - orders-api-prod.yaml

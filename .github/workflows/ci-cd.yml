@@ -1,0 +1,129 @@
+# =====================================================================
+# GitHub Actions: Build -> Dev Deploy -> Prod Deploy (approval)
+# Azure login uses OIDC (federated credentials) -> NO client secret stored.
+#
+# Repository VARIABLES (Settings > Secrets and variables > Actions > Variables):
+#   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
+#   ACR_NAME, AKS_RESOURCE_GROUP, AKS_NAME
+# Environments (Settings > Environments): "dev" and "prod" (prod = required reviewers)
+# =====================================================================
+name: orders-api CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths: ['app/**']
+  workflow_dispatch:
+
+permissions:
+  id-token: write     # needed to request the OIDC token for Azure login
+  contents: write     # needed to push the image-tag commit (GitOps)
+
+concurrency:
+  group: orders-api-cicd
+  cancel-in-progress: false
+
+env:
+  ACR_NAME: ${{ vars.ACR_NAME }}
+  IMAGE_REPO: orders-api
+  IMAGE_TAG: gha-${{ github.run_number }}
+  AKS_RG: ${{ vars.AKS_RESOURCE_GROUP }}
+  AKS_NAME: ${{ vars.AKS_NAME }}
+
+jobs:
+  # -------------------------------------------------------------------
+  build:
+    name: Build, scan & push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Docker build
+        run: |
+          docker build \
+            --label org.opencontainers.image.revision=${{ github.sha }} \
+            --label org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }} \
+            -t $ACR_NAME.azurecr.io/$IMAGE_REPO:$IMAGE_TAG app
+
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sudo sh -s -- -b /usr/local/bin
+          trivy --version
+
+      - name: Trivy vulnerability scan
+        run: |
+          IMAGE=$ACR_NAME.azurecr.io/$IMAGE_REPO:$IMAGE_TAG
+          echo "### Report: HIGH + CRITICAL (informational)"
+          trivy image --no-progress --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 "$IMAGE"
+          echo "### Gate: fail on any fixable CRITICAL"
+          trivy image --no-progress --severity CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Push image to ACR
+        run: |
+          az acr login --name $ACR_NAME
+          docker push $ACR_NAME.azurecr.io/$IMAGE_REPO:$IMAGE_TAG
+          echo "### Pushed \`$ACR_NAME.azurecr.io/$IMAGE_REPO:$IMAGE_TAG\`" >> $GITHUB_STEP_SUMMARY
+
+  # -------------------------------------------------------------------
+  deploy-dev:
+    name: Deploy to dev (GitOps)
+    needs: build
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Commit new tag to values-dev.yaml
+        run: bash scripts/update-image-tag.sh dev "$IMAGE_TAG"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Wait for Flux rollout in dev
+        run: |
+          command -v kubelogin >/dev/null || sudo az aks install-cli --only-show-errors
+          az aks get-credentials -g "$AKS_RG" -n "$AKS_NAME" --overwrite-existing
+          kubelogin convert-kubeconfig -l azurecli
+          bash scripts/wait-for-rollout.sh dev orders-api "$IMAGE_TAG"
+
+  # -------------------------------------------------------------------
+  deploy-prod:
+    name: Deploy to prod (approval)
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment: prod          # "Required reviewers" on this environment = approval gate
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Commit new tag to values-prod.yaml
+        run: bash scripts/update-image-tag.sh prod "$IMAGE_TAG"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Wait for Flux rollout in prod
+        run: |
+          command -v kubelogin >/dev/null || sudo az aks install-cli --only-show-errors
+          az aks get-credentials -g "$AKS_RG" -n "$AKS_NAME" --overwrite-existing
+          kubelogin convert-kubeconfig -l azurecli
+          bash scripts/wait-for-rollout.sh prod orders-api "$IMAGE_TAG"

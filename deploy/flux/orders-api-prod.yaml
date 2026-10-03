@@ -1,0 +1,33 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: orders-api-prod
+  namespace: flux-system
+spec:
+  interval: 2m
+  releaseName: orders-api
+  targetNamespace: prod
+  storageNamespace: prod
+  chart:
+    spec:
+      chart: ./charts/orders-api
+      reconcileStrategy: Revision
+      sourceRef:
+        kind: GitRepository
+        name: gitops
+        namespace: flux-system
+      valuesFiles:
+        - ./charts/orders-api/values.yaml
+        - ./charts/orders-api/values-prod.yaml
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+  driftDetection:
+    mode: enabled
+    ignore:
+      - paths: ["/spec/replicas"]
+        target:
+          kind: Deployment

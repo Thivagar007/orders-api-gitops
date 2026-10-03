@@ -1,0 +1,149 @@
+# =====================================================================
+# Azure DevOps multi-stage pipeline: Build -> Dev Deploy -> Prod Deploy
+#
+#  Build      : docker build -> Trivy scan (fail on CRITICAL) -> push to ACR
+#  DeployDev  : commit new tag to values-dev.yaml (GitOps)  -> wait for Flux rollout
+#  DeployProd : [manual approval on "orders-prod" environment]
+#               commit tag to values-prod.yaml              -> wait for Flux rollout
+#
+# Before first run (see GUIDE.md Step 6):
+#  - ARM service connection "sc-azure-orders" (Workload Identity Federation)
+#  - Environments "orders-dev" and "orders-prod" (approval check on prod)
+#  - Secret pipeline variable GITHUB_PAT (fine-grained PAT, Contents: read/write)
+# =====================================================================
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include: [app]          # only code changes trigger CI; manifest commits don't
+
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  azureServiceConnection: 'sc-azure-orders'
+  acrName: 'REPLACE_ACR_NAME'                 # e.g. acrordersdemo12345 (no .azurecr.io)
+  imageRepository: 'orders-api'
+  imageTag: 'ado-$(Build.BuildId)'
+  aksResourceGroup: 'rg-orders-demo'
+  aksName: 'aks-orders-demo'
+  # GITHUB_PAT -> defined as a SECRET variable in the pipeline UI, never in YAML
+
+stages:
+# ---------------------------------------------------------------------
+- stage: Build
+  displayName: 'Build, scan & push image'
+  jobs:
+  - job: BuildJob
+    displayName: 'Docker build + Trivy + push'
+    steps:
+    - checkout: self
+
+    - script: |
+        set -e
+        docker build \
+          --label org.opencontainers.image.revision=$(Build.SourceVersion) \
+          --label org.opencontainers.image.source=$(Build.Repository.Uri) \
+          -t $(acrName).azurecr.io/$(imageRepository):$(imageTag) \
+          app
+      displayName: 'Docker build'
+
+    - script: |
+        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+          | sudo sh -s -- -b /usr/local/bin
+        trivy --version
+      displayName: 'Install Trivy'
+
+    - script: |
+        set -e
+        IMAGE=$(acrName).azurecr.io/$(imageRepository):$(imageTag)
+        echo "### Report: HIGH + CRITICAL (informational)"
+        trivy image --no-progress --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 "$IMAGE"
+        echo "### Gate: fail the build on any fixable CRITICAL"
+        trivy image --no-progress --severity CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
+      displayName: 'Trivy vulnerability scan'
+
+    - task: AzureCLI@2
+      displayName: 'Push image to ACR'
+      inputs:
+        azureSubscription: ${{ variables.azureServiceConnection }}
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e
+          az acr login --name $(acrName)
+          docker push $(acrName).azurecr.io/$(imageRepository):$(imageTag)
+          echo "Pushed $(acrName).azurecr.io/$(imageRepository):$(imageTag)"
+
+# ---------------------------------------------------------------------
+- stage: DeployDev
+  displayName: 'Deploy to dev (GitOps)'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: DeployDev
+    displayName: 'Promote tag to dev'
+    environment: 'orders-dev'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - bash: bash scripts/update-image-tag.sh dev $(imageTag)
+            displayName: 'Commit new tag to values-dev.yaml'
+            env:
+              GITHUB_PAT: $(GITHUB_PAT)
+              REPO_SLUG: $(Build.Repository.Name)
+
+          - task: AzureCLI@2
+            displayName: 'Wait for Flux rollout in dev'
+            inputs:
+              azureSubscription: ${{ variables.azureServiceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -e
+                command -v kubelogin >/dev/null || sudo az aks install-cli --only-show-errors
+                az aks get-credentials -g $(aksResourceGroup) -n $(aksName) --overwrite-existing
+                kubelogin convert-kubeconfig -l azurecli
+                bash scripts/wait-for-rollout.sh dev orders-api $(imageTag)
+
+# ---------------------------------------------------------------------
+- stage: DeployProd
+  displayName: 'Deploy to prod (approval required)'
+  dependsOn: DeployDev
+  condition: succeeded()
+  jobs:
+  - deployment: DeployProd
+    displayName: 'Promote tag to prod'
+    environment: 'orders-prod'       # Approvals & checks are configured on this environment
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - bash: bash scripts/update-image-tag.sh prod $(imageTag)
+            displayName: 'Commit new tag to values-prod.yaml'
+            env:
+              GITHUB_PAT: $(GITHUB_PAT)
+              REPO_SLUG: $(Build.Repository.Name)
+
+          - task: AzureCLI@2
+            displayName: 'Wait for Flux rollout in prod'
+            inputs:
+              azureSubscription: ${{ variables.azureServiceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -e
+                command -v kubelogin >/dev/null || sudo az aks install-cli --only-show-errors
+                az aks get-credentials -g $(aksResourceGroup) -n $(aksName) --overwrite-existing
+                kubelogin convert-kubeconfig -l azurecli
+                bash scripts/wait-for-rollout.sh prod orders-api $(imageTag)

@@ -1,0 +1,9 @@
+# DEV overrides. image.tag is updated automatically by the CI/CD pipeline.
+environment: dev
+image:
+  tag: "initial"
+autoscaling:
+  minReplicas: 2
+  maxReplicas: 4
+podDisruptionBudget:
+  minAvailable: 1

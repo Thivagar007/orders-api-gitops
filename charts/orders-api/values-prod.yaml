@@ -1,7 +1,7 @@
 # PROD overrides. image.tag is updated by the pipeline ONLY after the approval gate.
 environment: prod
 image:
-  tag: "gha-2"
+  tag: "gha-3"
 autoscaling:
   minReplicas: 3
   maxReplicas: 10

@@ -8,9 +8,10 @@ set -euo pipefail
 # ---------- EDIT THESE ----------
 RG="rg-orders-demo"
 AKS="aks-orders-demo"
-ACR="REPLACE_ACR_NAME"
-GH_OWNER="<your-github-user>"
+ACR="acrthivagarorders2026"
+GH_OWNER="Thivagar007"
 GH_REPO="orders-api-gitops"
+SUBJECT_PREFIX="repo:Thivagar007@223748060/orders-api-gitops@1403616048"
 # --------------------------------
 
 APP_ID=$(az ad app create --display-name "gh-oidc-orders-api" --query appId -o tsv)
@@ -26,10 +27,10 @@ for pair in "gh-main:ref:refs/heads/main" "gh-env-dev:environment:dev" "gh-env-p
   az ad app federated-credential create --id "$APP_ID" --parameters "{
     \"name\": \"${NAME}\",
     \"issuer\": \"https://token.actions.githubusercontent.com\",
-    \"subject\": \"repo:${GH_OWNER}/${GH_REPO}:${SUBJECT_SUFFIX}\",
+    \"subject\": \"${SUBJECT_PREFIX}:${SUBJECT_SUFFIX}\",
     \"audiences\": [\"api://AzureADTokenExchange\"]
   }" -o none
-  echo "Federated credential: repo:${GH_OWNER}/${GH_REPO}:${SUBJECT_SUFFIX}"
+  echo "Federated credential: ${SUBJECT_PREFIX}:${SUBJECT_SUFFIX}"
 done
 
 ACR_ID=$(az acr show -n "$ACR" --query id -o tsv)

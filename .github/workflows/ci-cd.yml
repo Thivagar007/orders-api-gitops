@@ -12,7 +12,10 @@ name: orders-api CI/CD
 on:
   push:
     branches: [main]
-    paths: ['app/**']
+    paths:
+      - 'app/**'
+      - 'scripts/**'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
@@ -29,11 +32,16 @@ env:
   IMAGE_TAG: gha-${{ github.run_number }}
   AKS_RG: ${{ vars.AKS_RESOURCE_GROUP }}
   AKS_NAME: ${{ vars.AKS_NAME }}
+  
+defaults:
+  run:
+    shell: bash
 
 jobs:
   # -------------------------------------------------------------------
   build:
     name: Build, scan & push
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

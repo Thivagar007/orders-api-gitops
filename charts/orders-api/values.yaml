@@ -3,7 +3,7 @@
 # The CI/CD pipelines ONLY ever change image.tag in those env files.
 
 image:
-  repository: REPLACE_ACR_NAME.azurecr.io/orders-api
+  repository: acrthivagarorders2026.azurecr.io/orders-api
   tag: "initial"
   pullPolicy: IfNotPresent
 

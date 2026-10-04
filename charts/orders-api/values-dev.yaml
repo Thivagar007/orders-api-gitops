@@ -1,7 +1,7 @@
 # DEV overrides. image.tag is updated automatically by the CI/CD pipeline.
 environment: dev
 image:
-  tag: "gha-2"
+  tag: "gha-3"
 autoscaling:
   minReplicas: 2
   maxReplicas: 4

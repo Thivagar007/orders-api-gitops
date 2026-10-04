@@ -1,22 +1,18 @@
-# =====================================================================
-# Azure DevOps multi-stage pipeline: Build -> Dev Deploy -> Prod Deploy
-#
-#  Build      : docker build -> Trivy scan (fail on CRITICAL) -> push to ACR
-#  DeployDev  : commit new tag to values-dev.yaml (GitOps)  -> wait for Flux rollout
-#  DeployProd : [manual approval on "orders-prod" environment]
-#               commit tag to values-prod.yaml              -> wait for Flux rollout
-#
-# Before first run (see GUIDE.md Step 6):
-#  - ARM service connection "sc-azure-orders" (Workload Identity Federation)
-#  - Environments "orders-dev" and "orders-prod" (approval check on prod)
-#  - Secret pipeline variable GITHUB_PAT (fine-grained PAT, Contents: read/write)
-# =====================================================================
+# Build -> Dev Deploy -> Prod Deploy
+# Flux deploys from Git; the pipeline updates tags and checks rollout.
+# orders-api-config must contain the secret variable GITHUB_PAT.
+# Production approval is configured on the orders-prod environment.
 
 trigger:
+  batch: true
   branches:
-    include: [main]
+    include:
+    - main
   paths:
-    include: [app]          # only code changes trigger CI; manifest commits don't
+    include:
+    - app/**
+    - scripts/**
+    - azure-pipelines.yml
 
 pr: none
 
@@ -24,126 +20,189 @@ pool:
   vmImage: ubuntu-latest
 
 variables:
-  azureServiceConnection: 'sc-azure-orders'
-  acrName: 'REPLACE_ACR_NAME'                 # e.g. acrordersdemo12345 (no .azurecr.io)
-  imageRepository: 'orders-api'
-  imageTag: 'ado-$(Build.BuildId)'
-  aksResourceGroup: 'rg-orders-demo'
-  aksName: 'aks-orders-demo'
-  # GITHUB_PAT -> defined as a SECRET variable in the pipeline UI, never in YAML
+- group: orders-api-config
+- name: azureServiceConnection
+  value: sc-azure-orders
+- name: acrName
+  value: acrthivagarorders2026
+- name: imageRepository
+  value: orders-api
+- name: imageTag
+  value: ado-$(Build.BuildId)
+- name: aksResourceGroup
+  value: rg-orders-demo
+- name: aksName
+  value: aks-orders-demo
+- name: repoSlug
+  value: Thivagar007/orders-api-gitops
 
 stages:
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------------
+# BUILD
+# ---------------------------------------------------------------
 - stage: Build
-  displayName: 'Build, scan & push image'
+  displayName: 'Build, scan and push image'
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   jobs:
   - job: BuildJob
-    displayName: 'Docker build + Trivy + push'
+    displayName: 'Docker build, Trivy scan and ACR push'
     steps:
     - checkout: self
 
-    - script: |
-        set -e
+    - bash: |
+        set -euo pipefail
         docker build \
-          --label org.opencontainers.image.revision=$(Build.SourceVersion) \
-          --label org.opencontainers.image.source=$(Build.Repository.Uri) \
-          -t $(acrName).azurecr.io/$(imageRepository):$(imageTag) \
+          --label "org.opencontainers.image.revision=$(Build.SourceVersion)" \
+          --label "org.opencontainers.image.source=$(Build.Repository.Uri)" \
+          -t "$(acrName).azurecr.io/$(imageRepository):$(imageTag)" \
           app
-      displayName: 'Docker build'
+      displayName: 'Build Docker image'
 
-    - script: |
-        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+    - bash: |
+        set -euo pipefail
+        curl -fsSL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
           | sudo sh -s -- -b /usr/local/bin
         trivy --version
       displayName: 'Install Trivy'
 
-    - script: |
-        set -e
-        IMAGE=$(acrName).azurecr.io/$(imageRepository):$(imageTag)
-        echo "### Report: HIGH + CRITICAL (informational)"
-        trivy image --no-progress --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 "$IMAGE"
-        echo "### Gate: fail the build on any fixable CRITICAL"
-        trivy image --no-progress --severity CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
-      displayName: 'Trivy vulnerability scan'
+    - bash: |
+        set -euo pipefail
+        IMAGE="$(acrName).azurecr.io/$(imageRepository):$(imageTag)"
+        mkdir -p "$(Build.ArtifactStagingDirectory)/trivy"
+        echo '##vso[task.setvariable variable=trivyReportDirectoryReady]true'
+
+        trivy image --no-progress --exit-code 0 --format json \
+          --output "$(Build.ArtifactStagingDirectory)/trivy/report.json" "$IMAGE"
+
+        echo 'Report: fixable HIGH and CRITICAL vulnerabilities'
+        trivy image --no-progress --severity HIGH,CRITICAL \
+          --ignore-unfixed --exit-code 0 "$IMAGE"
+
+        echo 'Gate: fail on fixable CRITICAL vulnerabilities'
+        trivy image --no-progress --severity CRITICAL \
+          --ignore-unfixed --exit-code 1 "$IMAGE"
+      displayName: 'Scan image and enforce vulnerability gate'
+
+    - task: PublishPipelineArtifact@1
+      displayName: 'Save Trivy report'
+      condition: and(succeededOrFailed(), eq(variables['trivyReportDirectoryReady'], 'true'))
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/trivy'
+        artifact: trivy-report
 
     - task: AzureCLI@2
-      displayName: 'Push image to ACR'
+      displayName: 'Push scanned image to ACR'
       inputs:
         azureSubscription: ${{ variables.azureServiceConnection }}
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
-          set -e
-          az acr login --name $(acrName)
-          docker push $(acrName).azurecr.io/$(imageRepository):$(imageTag)
-          echo "Pushed $(acrName).azurecr.io/$(imageRepository):$(imageTag)"
+          set -euo pipefail
+          az acr login --name "$(acrName)"
+          docker push "$(acrName).azurecr.io/$(imageRepository):$(imageTag)"
 
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------------
+# DEV DEPLOY
+# ---------------------------------------------------------------
 - stage: DeployDev
   displayName: 'Deploy to dev (GitOps)'
   dependsOn: Build
   condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   jobs:
   - deployment: DeployDev
-    displayName: 'Promote tag to dev'
-    environment: 'orders-dev'
+    displayName: 'Promote image to dev'
+    environment: orders-dev
     strategy:
       runOnce:
         deploy:
           steps:
+          - download: none
+
           - checkout: self
             fetchDepth: 0
+            persistCredentials: false
 
-          - bash: bash scripts/update-image-tag.sh dev $(imageTag)
-            displayName: 'Commit new tag to values-dev.yaml'
+          - bash: |
+              set -euo pipefail
+              bash scripts/update-image-tag.sh dev "$(imageTag)"
+            displayName: 'Commit dev image tag to GitHub main'
             env:
               GITHUB_PAT: $(GITHUB_PAT)
-              REPO_SLUG: $(Build.Repository.Name)
+              REPO_SLUG: $(repoSlug)
 
           - task: AzureCLI@2
-            displayName: 'Wait for Flux rollout in dev'
+            displayName: 'Verify Flux deployment in dev'
             inputs:
               azureSubscription: ${{ variables.azureServiceConnection }}
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
-                set -e
-                command -v kubelogin >/dev/null || sudo az aks install-cli --only-show-errors
-                az aks get-credentials -g $(aksResourceGroup) -n $(aksName) --overwrite-existing
-                kubelogin convert-kubeconfig -l azurecli
-                bash scripts/wait-for-rollout.sh dev orders-api $(imageTag)
+                set -euo pipefail
 
-# ---------------------------------------------------------------------
+                if ! command -v kubectl >/dev/null || ! command -v kubelogin >/dev/null; then
+                  sudo az aks install-cli --only-show-errors
+                fi
+
+                az aks get-credentials \
+                  -g "$(aksResourceGroup)" \
+                  -n "$(aksName)" \
+                  --overwrite-existing
+
+                kubelogin convert-kubeconfig -l azurecli
+                bash scripts/wait-for-rollout.sh dev orders-api "$(imageTag)"
+
+                CURRENT_IMAGE=$(kubectl get deployment orders-api -n dev -o jsonpath='{.spec.template.spec.containers[0].image}')
+                test "$CURRENT_IMAGE" = "$(acrName).azurecr.io/$(imageRepository):$(imageTag)"
+
+# ---------------------------------------------------------------
+# PROD DEPLOY — environment approval required
+# ---------------------------------------------------------------
 - stage: DeployProd
   displayName: 'Deploy to prod (approval required)'
   dependsOn: DeployDev
-  condition: succeeded()
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   jobs:
   - deployment: DeployProd
-    displayName: 'Promote tag to prod'
-    environment: 'orders-prod'       # Approvals & checks are configured on this environment
+    displayName: 'Promote the same image to prod'
+    environment: orders-prod
     strategy:
       runOnce:
         deploy:
           steps:
+          - download: none
+
           - checkout: self
             fetchDepth: 0
+            persistCredentials: false
 
-          - bash: bash scripts/update-image-tag.sh prod $(imageTag)
-            displayName: 'Commit new tag to values-prod.yaml'
+          - bash: |
+              set -euo pipefail
+              bash scripts/update-image-tag.sh prod "$(imageTag)"
+            displayName: 'Commit prod image tag after approval'
             env:
               GITHUB_PAT: $(GITHUB_PAT)
-              REPO_SLUG: $(Build.Repository.Name)
+              REPO_SLUG: $(repoSlug)
 
           - task: AzureCLI@2
-            displayName: 'Wait for Flux rollout in prod'
+            displayName: 'Verify Flux deployment in prod'
             inputs:
               azureSubscription: ${{ variables.azureServiceConnection }}
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
-                set -e
-                command -v kubelogin >/dev/null || sudo az aks install-cli --only-show-errors
-                az aks get-credentials -g $(aksResourceGroup) -n $(aksName) --overwrite-existing
+                set -euo pipefail
+
+                if ! command -v kubectl >/dev/null || ! command -v kubelogin >/dev/null; then
+                  sudo az aks install-cli --only-show-errors
+                fi
+
+                az aks get-credentials \
+                  -g "$(aksResourceGroup)" \
+                  -n "$(aksName)" \
+                  --overwrite-existing
+
                 kubelogin convert-kubeconfig -l azurecli
-                bash scripts/wait-for-rollout.sh prod orders-api $(imageTag)
+                bash scripts/wait-for-rollout.sh prod orders-api "$(imageTag)"
+
+                CURRENT_IMAGE=$(kubectl get deployment orders-api -n prod -o jsonpath='{.spec.template.spec.containers[0].image}')
+                test "$CURRENT_IMAGE" = "$(acrName).azurecr.io/$(imageRepository):$(imageTag)"

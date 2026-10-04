@@ -7,6 +7,7 @@ set -euo pipefail
 
 # ---------- EDIT THESE ----------
 LOCATION="centralindia"
+AKS_LOCATION="southindia"
 RG="rg-orders-demo"
 AKS="aks-orders-demo"
 ACR="acrthivagarorders2026"
@@ -32,7 +33,7 @@ echo ">> Azure Container Registry"
 az acr create -g "$RG" -n "$ACR" --sku Basic --tags "${TAGS[@]}" -o none
 
 echo ">> AKS (Entra ID + Azure RBAC, OIDC issuer, ACR attached)"
-az aks create -g "$RG" -n "$AKS" --node-count 2 --node-vm-size Standard_D2s_v5 --enable-aad --enable-azure-rbac --enable-oidc-issuer --enable-workload-identity --attach-acr "$ACR" --tags "${TAGS[@]}" --generate-ssh-keys -o none
+az aks create -g "$RG" -n "$AKS" --location "$AKS_LOCATION" --node-count 2 --node-vm-size Standard_D2s_v4 --enable-aad --enable-azure-rbac --enable-oidc-issuer --enable-workload-identity --attach-acr "$ACR" --tags "${TAGS[@]}" --nodepool-tags "${TAGS[@]}" --generate-ssh-keys -o none
 
 AKS_ID=$(az aks show -g "$RG" -n "$AKS" --query id -o tsv)
 

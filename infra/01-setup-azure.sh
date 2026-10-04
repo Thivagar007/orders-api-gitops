@@ -9,8 +9,9 @@ set -euo pipefail
 LOCATION="centralindia"
 RG="rg-orders-demo"
 AKS="aks-orders-demo"
-ACR="acrordersdemo$RANDOM"           # must be globally unique, lowercase, 5-50 chars
-GITHUB_REPO_URL="https://github.com/<your-github-user>/orders-api-gitops"
+ACR="acrthivagarorders2026"
+GITHUB_REPO_URL="https://github.com/Thivagar007/orders-api-gitops.git"
+TAGS=("environment=dev" "owner=Thivagar" "cost-center=order-api-gitops")
 # --------------------------------
 
 SUB_ID=$(az account show --query id -o tsv)
@@ -20,22 +21,18 @@ echo "Subscription: $SUB_ID   ACR name will be: $ACR"
 echo ">> Registering resource providers + CLI extensions"
 az provider register -n Microsoft.ContainerService --wait
 az provider register -n Microsoft.KubernetesConfiguration --wait
+az provider register -n Microsoft.ContainerRegistry --wait
 az extension add -n k8s-configuration --upgrade -y
 az extension add -n k8s-extension --upgrade -y
 
 echo ">> Resource group"
-az group create -n "$RG" -l "$LOCATION" -o none
+az group create -n "$RG" -l "$LOCATION" --tags "${TAGS[@]}" -o none
 
 echo ">> Azure Container Registry"
-az acr create -g "$RG" -n "$ACR" --sku Basic -o none
+az acr create -g "$RG" -n "$ACR" --sku Basic --tags "${TAGS[@]}" -o none
 
 echo ">> AKS (Entra ID + Azure RBAC, OIDC issuer, ACR attached)"
-az aks create -g "$RG" -n "$AKS" \
-  --node-count 2 --node-vm-size Standard_B2s \
-  --enable-aad --enable-azure-rbac \
-  --enable-oidc-issuer --enable-workload-identity \
-  --attach-acr "$ACR" \
-  --generate-ssh-keys -o none
+az aks create -g "$RG" -n "$AKS" --node-count 2 --node-vm-size Standard_D2s_v5 --enable-aad --enable-azure-rbac --enable-oidc-issuer --enable-workload-identity --attach-acr "$ACR" --tags "${TAGS[@]}" --generate-ssh-keys -o none
 
 AKS_ID=$(az aks show -g "$RG" -n "$AKS" --query id -o tsv)
 

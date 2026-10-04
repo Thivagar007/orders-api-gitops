@@ -7,6 +7,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{ include "orders-api.selectorLabels" . }}
 app.kubernetes.io/version: {{ .Values.image.tag | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" | trimSuffix "_" | trimSuffix "." | quote }}
 environment: {{ .Values.environment }}
 {{- end }}
